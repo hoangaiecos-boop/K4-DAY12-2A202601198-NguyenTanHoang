@@ -112,5 +112,9 @@ Chạy ở máy (nhanh hơn nhiều) thì cắt gọn thành 10 lần `200` rồ
 
 Đặt ảnh trong thư mục `screenshots/`:
 
-- `screenshots/dashboard.png` — trang quản lý service trên platform
-- `screenshots/healthz.png` — kết quả gọi `/healthz` từ trình duyệt hoặc curl
+- `screenshots/dashboard.png` — service `day12-chat` trên Render: Docker, gói
+  Free, Blueprint managed, deploy live
+- `screenshots/healthz.png` — gọi `/healthz` từ trình duyệt, thấy rõ domain
+  `.onrender.com` trên thanh địa chỉ
+- `screenshots/docs.png` — Swagger UI tại `/docs` do FastAPI tự sinh, liệt kê
+  đủ 3 endpoint `GET /healthz`, `GET /readyz`, `POST /chat`
