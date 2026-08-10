@@ -43,8 +43,10 @@ USER appuser
 
 EXPOSE 8000
 
+# Đọc PORT lúc chạy chứ không cố định 8000: cloud gán cổng khác thì probe vẫn
+# phải trỏ đúng chỗ app đang lắng nghe.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()" || exit 1
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/healthz').read()" || exit 1
 
 # Dạng shell để ${PORT} được giãn nở lúc chạy — Railway/Render/Cloud Run tự gán
 # cổng qua biến này. Bind 0.0.0.0 chứ không phải 127.0.0.1, nếu không thì bên
