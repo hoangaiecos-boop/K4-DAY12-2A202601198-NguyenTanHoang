@@ -83,12 +83,26 @@ docker images | grep chat
 
 | Bản | Dung lượng |
 |-----|-----------|
-| 1 stage (bản đầu) | ... MB |
-| Multi-stage | ... MB |
+| 1 stage (bản đầu) | 1730 MB (1.73 GB) |
+| Multi-stage | 296 MB |
 
-Giải thích: phần dung lượng chênh lệch đó là những gì?
+Chênh lệch ~1430 MB. Tôi tra bằng `docker history` xem nó nằm ở đâu:
 
-> *Câu trả lời của bạn*
+**Phần lớn nhất là base image (~1400 MB).** `python:3.11` bản đầy đủ khoảng
+1.63 GB vì nó mang theo cả một môi trường build: gcc, g++, make, header của
+nhiều thư viện hệ thống, git, curl, tài liệu và man page. `python:3.11-slim`
+chỉ khoảng 230 MB — vẫn đủ chạy Python, chỉ bỏ những thứ để *biên dịch*. Sau khi
+`pip install` xong thì không còn cần compiler nữa, nên mang nó theo suốt đời
+image là vô ích.
+
+**Phần còn lại là cache của pip (~29 MB).** Layer `pip install` ở bản 1 stage
+nặng 94.5 MB, còn bản multi-stage chỉ 65.3 MB. Chênh lệch là thư mục
+`~/.cache/pip` — các file `.whl` đã tải về. Bản multi-stage không dính vì
+`--no-cache-dir` và vì stage runtime chỉ `COPY --from=builder /install`, tức là
+chỉ lấy *kết quả cài đặt*, không lấy nguyên thư mục nhà của builder.
+
+Điểm mấu chốt tôi rút ra: mọi thứ chỉ cần **lúc build** đều là rác **lúc chạy**.
+Multi-stage tồn tại để vẽ ranh giới giữa hai thời điểm đó.
 
 ---
 
@@ -98,7 +112,35 @@ Sửa một ký tự trong `app/main.py` rồi build lại. Với Dockerfile c�
 layer nào được dùng lại từ cache, layer nào phải chạy lại? Nếu bạn đặt
 `COPY . .` lên trước `RUN pip install` thì kết quả khác thế nào?
 
-> *Câu trả lời của bạn*
+Tôi thêm một dòng comment vào cuối `app/main.py` rồi build lại với
+`--progress=plain`:
+
+```
+#6  [runtime 2/6] RUN useradd --create-home --uid 10001 appuser   CACHED
+#7  [builder 2/4] WORKDIR /build                                  CACHED
+#8  [builder 4/4] RUN pip install --no-cache-dir ...              CACHED
+#9  [runtime 3/6] WORKDIR /app                                    CACHED
+#10 [builder 3/4] COPY requirements.txt .                         CACHED
+#11 [runtime 4/6] COPY --from=builder /install /usr/local         CACHED
+#12 [runtime 5/6] COPY app ./app                                  ← chạy lại
+#13 [runtime 6/6] COPY utils ./utils                              ← chạy lại
+```
+
+Toàn bộ stage `builder` được dùng lại, kể cả layer đắt nhất là `pip install`.
+Chỉ hai layer cuối phải chạy lại, và cả hai đều chỉ tốn vài trăm kB. Build lần
+hai xong trong khoảng 1.5 giây.
+
+Điều tôi không ngờ: `COPY utils ./utils` cũng chạy lại dù `utils/` không hề đổi.
+Lý do là cache của Docker mang tính dây chuyền — một layer bị huỷ thì **mọi
+layer sau nó** đều bị huỷ theo, vì layer sau được xây trên hệ thống file mà
+layer trước để lại. Nên thứ tự trong Dockerfile chính là thứ tự ưu tiên: cái gì
+ít thay đổi đặt lên trên, cái gì thay đổi mỗi lần commit đặt xuống dưới cùng.
+
+Nếu đặt `COPY . .` lên trước `RUN pip install`: mỗi lần sửa một dấu phẩy trong
+code là layer `COPY` đổi, kéo theo `pip install` bị huỷ cache và cài lại toàn
+bộ 13 thư viện trong `requirements.txt`. Build từ ~1.5 giây thành hàng chục
+giây tới vài phút — mỗi lần, cả ngày, và trên cả CI. Đó chính là lỗi của
+Dockerfile bản đầu.
 
 ---
 
@@ -108,7 +150,31 @@ Container mặc định chạy bằng root. Mô tả chuỗi sự kiện dẫn t
 trong code Python của bạn" tới "kẻ tấn công có quyền cao trên máy host", và
 lệnh `USER` cắt đứt chuỗi đó ở chỗ nào.
 
-> *Câu trả lời của bạn*
+Chuỗi sự kiện:
+
+1. Service có một lỗ hổng cho phép chạy lệnh tuỳ ý — ví dụ một chỗ nào đó ghép
+   chuỗi từ input người dùng vào `subprocess` hoặc `eval`. Kẻ tấn công gửi một
+   request khai thác chỗ đó.
+2. Lệnh của họ chạy **với quyền của tiến trình uvicorn**. Nếu Dockerfile không
+   có `USER`, tiến trình đó là root, nên họ có root *bên trong container*.
+3. Là root trong container, họ làm được những việc mà user thường không làm
+   được: cài thêm công cụ, đọc mọi file trong image, ghi vào mọi thư mục, và
+   quan trọng nhất là đọc/ghi được các volume mount từ host với quyền root.
+4. Từ đó họ tìm đường ra host: một volume mount hớ hênh (kinh điển là
+   `/var/run/docker.sock`), một container chạy `--privileged`, hoặc một lỗ hổng
+   thoát container của nhân. Với các đường này, root-trong-container thường
+   thành root-trên-host, vì UID 0 trong container và UID 0 trên host là **cùng
+   một UID** khi không bật user namespace.
+
+`USER appuser` cắt chuỗi ở **bước 2**. Lệnh của kẻ tấn công vẫn chạy — lỗ hổng
+ở tầng ứng dụng không biến mất — nhưng chạy với UID 10001, một user không có
+quyền gì đặc biệt: không ghi được ngoài thư mục nhà, không cài được package,
+không đọc được file chỉ dành cho root, và nếu có mount thì cũng chỉ đọc/ghi
+được đúng những gì UID 10001 được phép. Bước 3 và 4 mất hết nhiên liệu.
+
+Đây là nguyên tắc *least privilege*: không ngăn được sự cố thứ nhất, nhưng chặn
+nó leo thang thành sự cố thứ hai. Đổi lại chỉ tốn đúng hai dòng trong
+Dockerfile.
 
 ---
 
