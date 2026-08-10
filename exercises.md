@@ -45,13 +45,18 @@ Chạy service và gọi `/chat` vài lần. Dán một dòng log JSON bạn thu
 nêu **hai** việc bạn làm được với dòng log đó mà `print("đã trả lời xong")`
 không làm được.
 
-Ở CP1 tôi chưa gọi được `/chat` (endpoint đó thuộc CP3) và service cũng chưa
-khởi động được vì `lifespan` gọi `shutdown_guard.arm()` — hàm còn
-`NotImplementedError` tới CP4. Nên tôi lấy log bằng cách gọi thẳng `emit()`:
+Chạy `uvicorn app.main:app --port 8012` rồi gọi `/chat` vài lần, đây là log thu
+được trên stdout:
 
 ```
-{"event": "chat_completed", "severity": "INFO", "ts": "2026-08-10T07:55:58.659534+00:00", "client_id": "sv01", "prompt_tokens": 3, "completion_tokens": 37, "usd_cost": 2.26e-05}
+{"event": "service_started", "severity": "INFO", "ts": "2026-08-10T08:28:52.991311+00:00", "service": "day12-chat-service", "version": "1.0.0"}
+{"event": "chat_completed", "severity": "INFO", "ts": "2026-08-10T08:28:53.246557+00:00", "client_id": "sv01", "prompt_tokens": 3, "completion_tokens": 41, "usd_cost": 2.505e-05}
+{"event": "service_stopped", "severity": "INFO", "ts": "2026-08-10T08:28:53.398494+00:00", "service": "day12-chat-service"}
 ```
+
+(Lưu ý: phải làm xong CP4 mới chạy được lệnh này. Ở CP1 service chết ngay lúc
+khởi động vì `lifespan` gọi `shutdown_guard.arm()` khi hàm đó còn
+`NotImplementedError`.)
 
 **Việc 1 — cộng dồn theo trường.** `usd_cost` và `client_id` là hai trường
 riêng biệt có kiểu rõ ràng, nên tôi hỏi được "client nào tốn nhiều tiền nhất
@@ -285,7 +290,43 @@ cần job dọn dẹp nào cả — chỉ cần key cũ hết hạn theo TTL.
 Nếu gộp hai endpoint làm một và cho nó kiểm tra Redis, chuyện gì xảy ra với cụm
 3 container khi Redis mất kết nối 30 giây? Trả lời theo đúng thứ tự sự kiện.
 
-> *Câu trả lời của bạn*
+**Giây 0** — Redis mất kết nối. Cả 3 container vẫn khoẻ: tiến trình sống, code
+không lỗi, chỉ là dependency không trả lời.
+
+**Giây 0–10** — Endpoint gộp gọi `ping()`, thất bại, trả 503. Cả 3 container trả
+503 **cùng lúc**, vì chúng cùng phụ thuộc một Redis. Đây là điểm mấu chốt: lỗi
+không phân tán mà đồng loạt.
+
+**Giây 10–20** — Load balancer thấy 503 nên rút cả 3 khỏi vòng phục vụ. Không
+còn instance nào nhận traffic → 100% request lỗi. Đồng thời orchestrator đọc
+chính endpoint đó như **liveness** probe: đủ số lần thất bại liên tiếp
+(thường 3) là nó kết luận container hỏng.
+
+**Giây ~20** — Orchestrator giết và restart cả 3 container. Mọi request đang xử
+lý dở bị cắt. Cache trong process, kết nối đang mở, mọi thứ mất sạch.
+
+**Giây 20–30** — Container mới khởi động, nhưng Redis vẫn chưa về. Probe lại
+thất bại → restart lần hai. Nhiều orchestrator bắt đầu áp backoff luỹ tiến
+(10s, 20s, 40s...), nên chúng còn bị hoãn khởi động lại.
+
+**Giây 30** — Redis phục hồi. Nhưng cụm thì chưa: container đang ở giữa chu kỳ
+restart hoặc đang chờ hết backoff, rồi còn phải khởi động lại từ đầu.
+
+**Kết quả:** sự cố dependency 30 giây biến thành sự cố toàn phần vài phút, cộng
+thêm toàn bộ request đang chạy bị giết oan. Bản thân việc restart không sửa được
+gì cả — Redis chết thì container mới cũng không kết nối được.
+
+**Nếu tách hai endpoint:** `/healthz` không chạm Redis nên vẫn trả 200 suốt —
+orchestrator không restart ai cả, vì đúng là không có container nào hỏng.
+`/readyz` trả 503, load balancer ngừng đẩy traffic vào. Giây 30 Redis về,
+`ping()` thành công, `/readyz` trả 200 trở lại và traffic chảy tiếp **ngay lập
+tức**, không cần khởi động lại gì.
+
+Tôi rút ra: hai endpoint này trả lời hai câu hỏi khác nhau và có hai hậu quả
+khác nhau. `/healthz` = "có nên **giết** tôi không?" — hậu quả là restart, thứ
+chỉ hữu ích khi chính tiến trình hỏng. `/readyz` = "có nên **gửi traffic** cho
+tôi không?" — hậu quả là rút khỏi load balancer, thứ có thể đảo ngược tức thì.
+Gộp chúng lại là dùng cây búa để trả lời một câu hỏi cần cái công tắc.
 
 ---
 
