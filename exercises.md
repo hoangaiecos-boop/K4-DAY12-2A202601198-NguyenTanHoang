@@ -184,7 +184,30 @@ Vì sao 401 phải kèm header `WWW-Authenticate: Bearer`? Và vì sao ta trả 
 một** thông báo lỗi cho cả ba trường hợp (thiếu header, sai scheme, sai token)
 thay vì nói rõ sai ở đâu cho người dùng dễ sửa?
 
-> *Câu trả lời của bạn*
+**Vì sao 401 phải kèm `WWW-Authenticate: Bearer`.** 401 chỉ nói "bạn chưa được
+xác thực", nó không nói *xác thực bằng cách nào*. Header này là phần trả lời
+câu đó: nó khai báo scheme mà server chấp nhận. Nhờ vậy client tự động — trình
+duyệt, thư viện HTTP, `curl --oauth2-bearer` — biết phải gửi lại request kèm
+loại credential nào thay vì đoán mò. Chuẩn HTTP (RFC 7235) bắt buộc header này
+với mọi response 401, và RFC 6750 quy định giá trị `Bearer` cho token dạng này.
+Thiếu nó thì response vẫn "chạy được" với client viết tay, nhưng sai chuẩn và
+mọi công cụ tự động đều mù.
+
+**Vì sao dùng chung một thông báo.** Vì thông báo chi tiết là thông tin miễn phí
+cho người đang dò. "Sai scheme" xác nhận token họ có là đúng, chỉ gửi sai cách —
+họ sửa header rồi vào được. "Token không đúng" thì ngược lại, xác nhận cách gửi
+đã chuẩn và chỉ còn phải dò giá trị token. Mỗi lần phân biệt là một lần thu hẹp
+không gian tìm kiếm giúp họ.
+
+Người dùng hợp lệ không cần thông báo chi tiết: họ có token đúng và tài liệu API
+ghi rõ format. Người cần thông báo chi tiết chủ yếu là người không nên vào được.
+Trong code tôi gom cả ba nhánh về cùng một hàm `_unauthorized()` để không thể vô
+tình phân biệt.
+
+Cùng một logic là lý do tôi so sánh token bằng `secrets.compare_digest` thay vì
+`==`: `==` dừng ngay tại ký tự đầu tiên khác nhau, nên thời gian trả lời rò rỉ
+độ dài phần đã đoán đúng. Đó cũng là một dạng "thông báo chi tiết", chỉ là đo
+bằng đồng hồ thay vì đọc bằng mắt.
 
 ---
 
@@ -194,7 +217,31 @@ Với `capacity=10`, `refill_per_minute=10`: một client im lặng 10 phút r�
 liên tiếp. Nó gửi được bao nhiêu request trước khi bị 429? Nếu bỏ đoạn
 `min(capacity, ...)` trong `available()` thì con số đó thành bao nhiêu, và tại sao?
 
-> *Câu trả lời của bạn*
+Tôi chạy thử bằng `fakeredis`: tiêu cạn xô ở `t=1000`, để yên 600 giây rồi bắn
+liên tục cho tới khi bị chặn.
+
+| | Số request trước khi 429 |
+|---|---|
+| Có `min(capacity, ...)` | **10** |
+| Bỏ `min(capacity, ...)` | **100** |
+
+**Có `min()`:** 10 phút im lặng nạp được 10 phút × 10 token/phút = 100 token,
+nhưng xô chỉ chứa được 10. Phần dư tràn ra ngoài và mất. Client bắn được đúng
+`capacity` = 10 request, tới request thứ 11 thì xô cạn → 429.
+
+**Bỏ `min()`:** không còn cái nắp nào, `tokens` cứ cộng dồn theo thời gian trôi.
+100 token tích được là 100 token tiêu được. Con số này tỉ lệ thuận với thời gian
+im lặng: nghỉ 1 giờ thì 600 request, nghỉ một ngày thì 14.400 request — tất cả
+trong một giây.
+
+Điều đó phá hỏng đúng thứ mà rate limit sinh ra để bảo vệ. Ý nghĩa của
+`capacity` là **mức bùng tối đa** mà hệ thống chịu được trong một khoảnh khắc;
+`refill_per_minute` mới là tốc độ trung bình dài hạn. Bỏ `min()` là bỏ luôn giới
+hạn thứ nhất, chỉ còn giới hạn thứ hai — mà giới hạn trung bình thì không cứu
+được server khi 14.400 request ập vào cùng lúc.
+
+Đây cũng là lý do một client "ngoan" nhưng ngủ đông lâu ngày có thể vô tình
+thành nguồn tấn công, nếu ta quên cái nắp đó.
 
 ---
 
@@ -204,7 +251,32 @@ So sánh hạn mức $30/tháng với hạn mức $1/ngày cho cùng một clien
 cố khiến một client gọi liên tục từ 2h sáng. Với mỗi cách, thiệt hại tối đa là
 bao nhiêu và service tự hồi phục khi nào?
 
-> *Câu trả lời của bạn*
+| | Hạn mức $30/tháng | Hạn mức $1/ngày |
+|---|---|---|
+| Thiệt hại tối đa của sự cố | $30 | $1 |
+| Client bị chặn tới khi nào | đầu tháng sau | 00:00 UTC hôm sau |
+| Thời gian chặn tệ nhất | ~30 ngày | ~24 giờ |
+
+**$30/tháng.** Sự cố bắt đầu 2h sáng ngày mùng 2. Không có gì chặn tốc độ tiêu,
+nên nó đốt hết $30 trong vài giờ. 6h sáng tôi thức dậy: tiền đã mất hết, và tệ
+hơn — client đó bị khoá cho tới **ngày 1 tháng sau**, tức là 29 ngày không dùng
+được service dù sự cố chỉ kéo dài vài giờ. Muốn nó dùng lại thì phải có người
+vào can thiệp tay: nâng hạn mức hoặc xoá key.
+
+**$1/ngày.** Cùng sự cố đó đốt hết $1 rồi dừng. `check()` trả 402 cho mọi
+request tiếp theo, nên phần còn lại của đêm không mất thêm đồng nào. Đúng
+00:00 UTC, `CostGuard.today()` trả về nhãn ngày mới → `_key()` sinh ra key mới →
+`spent()` đọc key chưa tồn tại → trả 0.0. Ngân sách tự đầy lại **mà không ai
+phải làm gì**.
+
+Điểm tôi thấy quan trọng nhất không phải con số $30 với $1, mà là **cửa sổ hồi
+phục**. Hạn mức càng dài thì hai thứ cùng xấu đi một lúc: mất nhiều tiền hơn
+*và* bị khoá lâu hơn. Hạn mức ngày cắt cả hai xuống 1/30, và biến việc hồi phục
+từ "chờ người xử lý" thành "chờ đồng hồ điểm nửa đêm".
+
+Đó cũng là lý do key trong Redis đặt theo `spend:<client_id>:<ngày>` chứ không
+phải một bộ đếm duy nhất: nhãn ngày nằm ngay trong tên key, nên việc reset không
+cần job dọn dẹp nào cả — chỉ cần key cũ hết hạn theo TTL.
 
 ---
 
