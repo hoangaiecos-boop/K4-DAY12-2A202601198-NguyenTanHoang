@@ -336,4 +336,53 @@ Ghi lại **một** lỗi bạn gặp khi deploy lên cloud (build fail, health 
 timeout, sai REDIS_URL, app không đọc `$PORT`...): thông báo lỗi là gì, bạn
 tìm ra nguyên nhân bằng cách nào, và sửa ra sao?
 
-> *Câu trả lời của bạn*
+Bản deploy lên Render lên xanh ngay lần đầu, nên tôi kể hai lỗi thật đã chặn
+đường trước khi tới được bước đó — một lỗi làm service không khởi động nổi, một
+lỗi về `$PORT` mà tôi bắt được trước khi nó kịp gây hại trên cloud.
+
+**Lỗi 1 — service không khởi động được.** Ở CP1 tôi làm xong `/healthz`, test
+xanh 13/13, nên tưởng chạy thử được. Nhưng `uvicorn app.main:app --port 8000`
+chết ngay:
+
+```
+File "app/main.py", line 65, in lifespan
+    shutdown_guard.arm()
+File "app/lifecycle.py", line 60, in arm
+    raise NotImplementedError("TODO (CP4): cài đặt arm")
+ERROR:    Application startup failed. Exiting.
+```
+
+Chỗ khó hiểu là **test xanh mà app lại chết**. Đọc traceback thì thấy lỗi phát
+sinh trong `lifespan`, và tra `tests/conftest.py` mới hiểu: `_build_client()` cố
+tình **không** dùng `with TestClient(...)`, mà `lifespan` chỉ chạy khi dùng dạng
+context manager. Nghĩa là test chưa bao giờ đi qua `arm()`. Không có cách sửa
+nào ở CP1 cả — `arm()` thuộc CP4, phải làm xong CP4 thì service mới chạy được.
+Bài học: **test xanh không đồng nghĩa app chạy được**; test bao đến đâu thì bảo
+đảm đến đó, và ở đây nó cố tình bỏ qua vòng đời khởi động.
+
+**Lỗi 2 — `HEALTHCHECK` gọi cứng cổng 8000.** `CMD` trong Dockerfile của tôi đọc
+`${PORT:-8000}` đúng, nhưng dòng `HEALTHCHECK` thì tôi viết thẳng
+`http://127.0.0.1:8000/healthz`. Render gán `PORT=10000`, nên app lắng nghe
+10000 còn probe gõ cửa 8000 — mãi mãi không ai trả lời.
+
+Tôi phát hiện bằng cách chạy thử đúng điều kiện của Render ngay ở máy:
+
+```
+docker run -e PORT=10000 -p 10000:10000 day12-chat:prod
+docker inspect --format '{{.State.Health.Status}}' <container>
+```
+
+Sửa bằng cách cho probe đọc cùng một biến với `CMD`:
+
+```dockerfile
+CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/healthz').read()" || exit 1
+```
+
+Chạy lại thì `Health.Status` chuyển thành `healthy`.
+
+Điểm đáng nói: Render dùng `healthCheckPath` trong `render.yaml` chứ không dùng
+`HEALTHCHECK` của Dockerfile, nên lỗi này **sẽ không làm bản deploy fail** —
+nó chỉ âm thầm sai. Đúng kiểu lỗi khó chịu nhất: không ai báo, và tới khi chạy
+image đó ở chỗ có dùng Docker healthcheck (như `docker compose`) mới lộ ra.
+Nguyên tắc rút ra là mọi chỗ nhắc tới cổng đều phải lấy từ cùng một nguồn —
+biến `PORT` — chứ không được có hai chỗ tự khai số riêng.
