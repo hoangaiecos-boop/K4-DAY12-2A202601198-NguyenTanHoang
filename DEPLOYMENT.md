@@ -18,7 +18,7 @@
 
 | Mục | Nội dung |
 |-----|----------|
-| Public URL | https://TODO-dan-url-sau-khi-deploy.onrender.com |
+| Public URL | https://day12-chat-5hec.onrender.com |
 | Platform | Render (Blueprint từ `render.yaml`) |
 | Ngày deploy | 2026-08-10 |
 
@@ -71,11 +71,42 @@ done; echo
 
 ## Kết Quả Chạy Thật
 
-Output các lệnh trên sẽ được dán vào đây sau khi service lên:
+```
+$ curl -i https://day12-chat-5hec.onrender.com/healthz
+HTTP/2 200
+{"status":"ok","service":"day12-chat-service","version":"1.0.0"}
 
+$ curl -i https://day12-chat-5hec.onrender.com/readyz
+HTTP/2 200
+{"status":"ready","redis":true}
+
+$ curl -i -X POST .../chat            # không có token
+HTTP/2 401
+www-authenticate: Bearer
+
+$ curl -i -X POST .../chat            # có token, gọi lần thứ hai cùng client
+HTTP/2 200
+content-type: application/json
+{"reply":"Ngắn gọn: Deploy la gi phụ thuộc vào ba yếu tố — cấu hình qua biến môi
+trường, health check để orchestrator biết trạng thái, và giới hạn tài nguyên.
+(Mình đang nhớ 2 lượt trao đổi trước đó.)","client_id":"sv-doc","turns_before":2,
+"usd_cost":3.465e-05,"usage":{"prompt":43,"completion":47}}
+
+$ for i in $(seq 1 15); do ... done   # rate limit, client sv-burst
+200 200 200 200 200 200 200 200 200 200 429 200 429 429 200
 ```
-chưa chạy — cập nhật sau khi deploy xong
-```
+
+Hai điều đọc được từ output này:
+
+**`turns_before: 2`** — lượt gọi thứ hai của cùng một `client_id` thấy được 2
+message của lượt trước. State nằm trong Render Key Value chứ không trong RAM của
+container, đúng mục tiêu stateless của CP4.
+
+**Chuỗi rate limit không cắt gọn** — 10 request đầu qua (đúng `BUCKET_CAPACITY`),
+rồi xen kẽ `429` và `200`. Lúc đầu tôi tưởng sai, nhưng đó chính là token bucket
+hoạt động đúng: `REFILL_PER_MINUTE=10` nghĩa là cứ 6 giây có thêm 1 token, mà 15
+lượt curl qua Internet mất hơn 15 giây, nên vài token kịp nhỏ vào xô giữa chừng.
+Chạy ở máy (nhanh hơn nhiều) thì cắt gọn thành 10 lần `200` rồi `429` liên tục.
 
 ## Ảnh Chụp Màn Hình
 
