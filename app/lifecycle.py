@@ -45,7 +45,14 @@ class ShutdownGuard:
         tham số này. Không làm gì nặng ở đây (không gọi mạng, không ghi file)
         — handler chạy xen giữa bytecode.
         """
-        raise NotImplementedError("TODO (CP4): cài đặt start_draining")
+        self.draining = True
+
+        # Nhường lại cho handler của uvicorn — nó mới là thứ thật sự dừng
+        # server. Không gọi, app bật cờ "đang tắt" rồi chạy tiếp tới khi bị
+        # SIGKILL, đúng cái graceful shutdown định tránh.
+        previous = self._previous.get(signum)
+        if callable(previous):
+            previous(signum, frame)
 
     def arm(self) -> None:
         """Đăng ký handler cho SIGTERM và SIGINT, nhớ lại handler cũ.
@@ -57,7 +64,10 @@ class ShutdownGuard:
 
         SIGTERM: orchestrator yêu cầu tắt. SIGINT: bạn bấm Ctrl+C.
         """
-        raise NotImplementedError("TODO (CP4): cài đặt arm")
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            # Nhớ handler cũ TRƯỚC khi ghi đè, nếu không là mất luôn.
+            self._previous[sig] = signal.getsignal(sig)
+            signal.signal(sig, self.start_draining)
 
 
 # Một instance dùng chung cho cả app
