@@ -34,10 +34,26 @@ services:
       timeout: 3s
       retries: 5
 
-  # TODO (CP2): khai báo service `chat` ở đây
-  # chat:
-  #   build: .
-  #   ...
+  chat:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Nội suy từ file .env cùng thư mục — token không nằm trong file này,
+      # vì docker-compose.yml được commit lên repo public.
+      API_TOKEN: ${API_TOKEN}
+      # `redis` là tên service ở trên, đồng thời là hostname trong mạng compose.
+      # Dùng localhost ở đây là trỏ vào chính container chat, không phải Redis.
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 volumes:
   redis-data:
